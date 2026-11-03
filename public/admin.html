@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Chat Live Admin</title>
+<style>
+body{font-family:sans-serif;margin:0;display:flex;height:100vh;background:#f4f6f8}
+#list{width:300px;background:#fff;border-right:1px solid #ccc;overflow-y:auto}
+.conv{padding:15px;border-bottom:1px solid #eee;cursor:pointer}
+.conv:hover{background:#f0f4ff}
+#chat{flex:1;display:flex;flex-direction:column}
+#messages{flex:1;padding:20px;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+.msg{padding:10px 15px;border-radius:10px;max-width:60%;white-space:pre-wrap}
+.msg.visitor{background:#fff;border:1px solid #ccc;align-self:flex-start}
+.msg.admin{background:#1438f5;color:#fff;align-self:flex-end}
+#input-area{padding:20px;background:#fff;border-top:1px solid #ccc;display:flex;gap:10px}
+input{flex:1;padding:10px;border:1px solid #ccc;border-radius:5px}
+button{padding:10px 20px;background:#1438f5;color:#fff;border:none;border-radius:5px;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="list"></div>
+<div id="chat">
+<div id="messages"><p style="color:#888;text-align:center;margin-top:50px">Select a conversation</p></div>
+<div id="input-area" style="display:none">
+<input id="input" type="text" placeholder="Type reply..." />
+<button id="send">Send</button>
+</div>
+</div>
+<script>
+var API_KEY = prompt("Enter your Site API Key:");
+var activeConv = null;
+var currentEventSource = null;
+
+function loadConversations() {
+  fetch("/api/admin/conversations?api_key=" + API_KEY)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      document.getElementById("list").innerHTML = data.map(function(c) {
+        return '<div class="conv" onclick="openChat(\'' + c.id + '\')"><strong>' + c.visitor_id + '</strong><br/><small style="color:#666">' + (c.last_message || "No messages") + '</small></div>';
+      }).join("");
+    });
+}
+
+function openChat(id) {
+  activeConv = id;
+  document.getElementById("input-area").style.display = "flex";
+  if (currentEventSource) currentEventSource.close();
+  loadConversations();
+  var box = document.getElementById("messages");
+  box.innerHTML = "";
+  fetch("/api/chat/init", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey: API_KEY, visitorId: id })
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    var realConvId = data.conversationId;
+    box.innerHTML = "";
+    data.messages.forEach(renderMsg);
+    currentEventSource = new EventSource("/api/sse/admin?api_key=" + API_KEY);
+    currentEventSource.onmessage = function(e) {
+      var payload = JSON.parse(e.data);
+      if (payload.type === "new_message" && payload.data.conversation_id === realConvId) {
+        renderMsg(payload.data);
+        loadConversations();
+      }
+    };
+    document.getElementById("send").onclick = function() {
+      var text = document.getElementById("input").value.trim();
+      if (!text) return;
+      document.getElementById("input").value = "";
+      fetch("/api/chat/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: realConvId, senderType: "admin", message: text })
+      });
+    };
+  });
+}
+
+function renderMsg(m) {
+  var box = document.getElementById("messages");
+  var el = document.createElement("div");
+  el.className = "msg " + m.sender_type;
+  el.textContent = m.message;
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+loadConversations();
+</script>
+</body>
+</html>
