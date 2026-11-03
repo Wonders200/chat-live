@@ -3,42 +3,85 @@
 <head>
 <title>Chat Live Admin</title>
 <style>
-body{font-family:sans-serif;margin:0;display:flex;height:100vh;background:#f4f6f8}
-#list{width:300px;background:#fff;border-right:1px solid #ccc;overflow-y:auto}
-.conv{padding:15px;border-bottom:1px solid #eee;cursor:pointer}
-.conv:hover{background:#f0f4ff}
-#chat{flex:1;display:flex;flex-direction:column}
-#messages{flex:1;padding:20px;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
-.msg{padding:10px 15px;border-radius:10px;max-width:60%;white-space:pre-wrap}
-.msg.visitor{background:#fff;border:1px solid #ccc;align-self:flex-start}
-.msg.admin{background:#1438f5;color:#fff;align-self:flex-end}
-#input-area{padding:20px;background:#fff;border-top:1px solid #ccc;display:flex;gap:10px}
-input{flex:1;padding:10px;border:1px solid #ccc;border-radius:5px}
-button{padding:10px 20px;background:#1438f5;color:#fff;border:none;border-radius:5px;cursor:pointer}
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; margin:0; display:flex; height:100vh; background:#f4f6f8; }
+  #list { width:320px; background:#fff; border-right:1px solid #e5e7eb; overflow-y:auto; }
+  .conv { padding:16px 20px; border-bottom:1px solid #f3f4f6; cursor:pointer; transition:background 0.2s; }
+  .conv:hover { background:#f9fafb; }
+  .conv.active { background:#eff6ff; border-left:4px solid #1438f5; padding-left:16px; }
+  .conv-name { font-weight:700; color:#111827; font-size:14px; display:flex; justify-content:space-between; }
+  .conv-preview { font-size:13px; color:#6b7280; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #chat { flex:1; display:flex; flex-direction:column; background:#fff; }
+  #messages { flex:1; padding:24px; overflow-y:auto; display:flex; flex-direction:column; gap:12px; background:#f8fafc; }
+  .msg { padding:12px 16px; border-radius:12px; max-width:65%; font-size:14px; line-height:1.5; word-wrap:break-word; }
+  .msg.visitor { background:#fff; border:1px solid #e5e7eb; align-self:flex-start; border-bottom-left-radius:4px; color:#111827; }
+  .msg.admin { background:#1438f5; color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
+  .msg img { max-width:240px; border-radius:8px; margin-top:8px; display:block; cursor:pointer; }
+  #input-area { padding:16px 24px; background:#fff; border-top:1px solid #e5e7eb; display:flex; gap:12px; align-items:center; }
+  input[type="text"] { flex:1; padding:12px 16px; border:1px solid #e5e7eb; border-radius:24px; font-size:14px; outline:none; transition:border 0.2s; }
+  input[type="text"]:focus { border-color:#1438f5; }
+  .btn { background:#1438f5; color:#fff; border:none; padding:0 24px; height:44px; border-radius:24px; cursor:pointer; font-weight:700; font-size:14px; transition:background 0.2s; }
+  .btn:hover { background:#0a1c8a; }
+  .attach-btn { background:none; border:none; color:#6b7280; cursor:pointer; padding:8px; display:flex; align-items:center; justify-content:center; }
+  .attach-btn:hover { color:#1438f5; }
+  .empty-state { display:flex; height:100%; align-items:center; justify-content:center; color:#9ca3af; font-size:15px; }
 </style>
 </head>
 <body>
 <div id="list"></div>
 <div id="chat">
-<div id="messages"><p style="color:#888;text-align:center;margin-top:50px">Select a conversation</p></div>
-<div id="input-area" style="display:none">
-<input id="input" type="text" placeholder="Type reply..." />
-<button id="send">Send</button>
+  <div id="messages"><div class="empty-state">Select a conversation to start chatting</div></div>
+  <div id="input-area" style="display:none">
+    <button class="attach-btn" id="attach-btn">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+    </button>
+    <input type="file" id="file-input" accept="image/*" style="display:none" />
+    <input type="text" id="input" placeholder="Type a reply..." autocomplete="off" />
+    <button class="btn" id="send">Send</button>
+  </div>
 </div>
-</div>
+
 <script>
 var API_KEY = prompt("Enter your Site API Key:");
+if (!API_KEY) { document.body.innerHTML = "<h2 style='padding:40px;color:red'>API Key is required</h2>"; }
+
 var activeConv = null;
 var currentEventSource = null;
+var selectedFile = null;
 
 function loadConversations() {
   fetch("/api/admin/conversations?api_key=" + API_KEY)
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      document.getElementById("list").innerHTML = data.map(function(c) {
-        return '<div class="conv" onclick="openChat(\'' + c.id + '\')"><strong>' + c.visitor_id + '</strong><br/><small style="color:#666">' + (c.last_message || "No messages") + '</small></div>';
+      var list = document.getElementById("list");
+      if (!data.length) {
+        list.innerHTML = '<div style="padding:20px;text-align:center;color:#9ca3af;font-size:13px;">No conversations yet</div>';
+        return;
+      }
+      list.innerHTML = data.map(function(c) {
+        var active = c.id === activeConv ? "active" : "";
+        var preview = c.last_message || (c.last_attachment ? "📷 Image" : "No messages");
+        return '<div class="conv ' + active + '" onclick="openChat(\'' + c.id + '\')">' +
+               '<div class="conv-name">' + (c.visitor_name || "Visitor") + '</div>' +
+               '<div class="conv-preview">' + preview + '</div>' +
+               '</div>';
       }).join("");
     });
+}
+
+function renderMsg(m) {
+  var box = document.getElementById("messages");
+  if (box.querySelector(".empty-state")) box.innerHTML = "";
+  
+  var el = document.createElement("div");
+  el.className = "msg " + m.sender_type;
+  
+  var html = "";
+  if (m.message) html += m.message.replace(/</g, "&lt;").replace(/>/g, "&gt;") + "<br/>";
+  if (m.attachment_url) html += '<img src="' + m.attachment_url + '" onclick="window.open(this.src)" />';
+  
+  el.innerHTML = html;
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
 }
 
 function openChat(id) {
@@ -46,8 +89,10 @@ function openChat(id) {
   document.getElementById("input-area").style.display = "flex";
   if (currentEventSource) currentEventSource.close();
   loadConversations();
+  
   var box = document.getElementById("messages");
   box.innerHTML = "";
+  
   fetch("/api/chat/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -55,7 +100,9 @@ function openChat(id) {
   }).then(function(r) { return r.json(); }).then(function(data) {
     var realConvId = data.conversationId;
     box.innerHTML = "";
-    data.messages.forEach(renderMsg);
+    if (!data.messages.length) box.innerHTML = '<div class="empty-state">No messages yet</div>';
+    else data.messages.forEach(renderMsg);
+    
     currentEventSource = new EventSource("/api/sse/admin?api_key=" + API_KEY);
     currentEventSource.onmessage = function(e) {
       var payload = JSON.parse(e.data);
@@ -64,27 +111,50 @@ function openChat(id) {
         loadConversations();
       }
     };
+    
     document.getElementById("send").onclick = function() {
       var text = document.getElementById("input").value.trim();
-      if (!text) return;
-      document.getElementById("input").value = "";
-      fetch("/api/chat/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId: realConvId, senderType: "admin", message: text })
-      });
+      if (!text && !selectedFile) return;
+      
+      var doSend = function(base64) {
+        document.getElementById("input").value = "";
+        var payload = { conversationId: realConvId, senderType: "admin", message: text };
+        if (base64) payload.attachmentData = base64;
+        
+        selectedFile = null;
+        document.getElementById("file-input").value = "";
+        
+        fetch("/api/chat/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+      };
+
+      if (selectedFile) {
+        var reader = new FileReader();
+        reader.onload = function() { doSend(reader.result); };
+        reader.readAsDataURL(selectedFile);
+      } else {
+        doSend(null);
+      }
     };
   });
 }
 
-function renderMsg(m) {
-  var box = document.getElementById("messages");
-  var el = document.createElement("div");
-  el.className = "msg " + m.sender_type;
-  el.textContent = m.message;
-  box.appendChild(el);
-  box.scrollTop = box.scrollHeight;
-}
+document.getElementById("attach-btn").onclick = function() {
+  document.getElementById("file-input").click();
+};
+
+document.getElementById("file-input").onchange = function() {
+  if (this.files && this.files[0]) {
+    selectedFile = this.files[0];
+  }
+};
+
+document.getElementById("input").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") { e.preventDefault(); document.getElementById("send").click(); }
+});
 
 loadConversations();
 </script>

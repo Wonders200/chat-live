@@ -2,13 +2,19 @@ const express = require("express");
 const Database = require("better-sqlite3");
 const cors = require("cors");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const db = new Database("chat-live.db");
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static("public"));
+
+// Ensure uploads folder exists
+const UPLOAD_DIR = path.join(__dirname, "public", "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); }
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS sites (
@@ -19,16 +25,26 @@ db.exec(`
     id TEXT PRIMARY KEY,
     site_api_key TEXT NOT NULL,
     visitor_id TEXT NOT NULL,
+    visitor_name TEXT DEFAULT 'Anonymous Visitor',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL,
     sender_type TEXT NOT NULL,
-    message TEXT NOT NULL,
+    message TEXT,
+    attachment_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+// Schema migration for existing DB
+try {
+  const cols = db.prepare("PRAGMA table_info(conversations)").all().map(c => c.name);
+  if (!cols.includes("visitor_name")) db.exec("ALTER TABLE conversations ADD COLUMN visitor_name TEXT DEFAULT 'Anonymous Visitor'");
+  const mcols = db.prepare("PRAGMA table_info(messages)").all().map(c => c.name);
+  if (!mcols.includes("attachment_url")) db.exec("ALTER TABLE messages ADD COLUMN attachment_url TEXT");
+} catch (e) {}
 
 if (!db.prepare("SELECT * FROM sites").get()) {
   const demoKey = "live_" + crypto.randomBytes(16).toString("hex");
@@ -49,6 +65,18 @@ function broadcastToVisitor(convId, data) {
 function broadcastToAdmin(apiKey, data) {
   const clients = admins.get(apiKey);
   if (clients) clients.forEach(res => res.write(`data: ${JSON.stringify(data)}\n\n`));
+}
+
+function saveBase64Image(dataUrl) {
+  try {
+    const matches = dataUrl.match(/^data:image\/([A-Za-z-+\/]+);base64,(.+)$/);
+    if (!matches || matches.length !== 3) return null;
+    const ext = matches[1].replace('jpeg', 'jpg');
+    const buffer = Buffer.from(matches[2], 'base64');
+    const filename = 'chat_' + Date.now() + '_' + Math.floor(Math.random() * 1000) + '.' + ext;
+    fs.writeFileSync(path.join(UPLOAD_DIR, filename), buffer);
+    return '/uploads/' + filename;
+  } catch (e) { return null; }
 }
 
 app.get("/api/sse/visitor/:convId", (req, res) => {
@@ -82,24 +110,38 @@ app.get("/api/sse/admin", (req, res) => {
 });
 
 app.post("/api/chat/init", (req, res) => {
-  const { apiKey, visitorId } = req.body;
+  const { apiKey, visitorId, visitorName } = req.body;
   const site = db.prepare("SELECT * FROM sites WHERE api_key = ?").get(apiKey);
   if (!site) return res.status(401).json({ error: "Invalid API Key" });
-  let conv = db.prepare("SELECT id FROM conversations WHERE site_api_key = ? AND visitor_id = ?").get(apiKey, visitorId);
+  
+  let conv = db.prepare("SELECT * FROM conversations WHERE site_api_key = ? AND visitor_id = ?").get(apiKey, visitorId);
+  
   if (!conv) {
-    const convId = "conv_" + crypto.randomBytes(8).toString("hex");
-    db.prepare("INSERT INTO conversations (id, site_api_key, visitor_id) VALUES (?, ?, ?)").run(convId, apiKey, visitorId);
-    conv = { id: convId };
+    const convId = "conv_" + crypto.randomBytes(4).toString("hex");
+    db.prepare("INSERT INTO conversations (id, site_api_key, visitor_id, visitor_name) VALUES (?, ?, ?, ?)").run(convId, apiKey, visitorId, visitorName || "Anonymous Visitor");
+    conv = { id: convId, visitor_name: visitorName || "Anonymous Visitor" };
+  } else if (visitorName && conv.visitor_name === "Anonymous Visitor") {
+    db.prepare("UPDATE conversations SET visitor_name = ? WHERE id = ?").run(visitorName, conv.id);
+    conv.visitor_name = visitorName;
   }
+
   const messages = db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC").all(conv.id);
-  res.json({ conversationId: conv.id, messages });
+  res.json({ conversationId: conv.id, visitorName: conv.visitor_name, messages });
 });
 
 app.post("/api/chat/send", (req, res) => {
-  const { conversationId, senderType, message } = req.body;
-  const info = db.prepare("INSERT INTO messages (conversation_id, sender_type, message) VALUES (?, ?, ?)").run(conversationId, senderType, message);
-  const newMsg = { id: info.lastInsertRowid, conversation_id: conversationId, sender_type: senderType, message, created_at: new Date().toISOString() };
+  const { conversationId, senderType, message, attachmentData } = req.body;
+  let attachmentUrl = null;
+  
+  if (attachmentData) {
+    attachmentUrl = saveBase64Image(attachmentData);
+  }
+
+  const info = db.prepare("INSERT INTO messages (conversation_id, sender_type, message, attachment_url) VALUES (?, ?, ?, ?)").run(conversationId, senderType, message || "", attachmentUrl);
+  
+  const newMsg = { id: info.lastInsertRowid, conversation_id: conversationId, sender_type: senderType, message: message || "", attachment_url: attachmentUrl, created_at: new Date().toISOString() };
   const conv = db.prepare("SELECT site_api_key FROM conversations WHERE id = ?").get(conversationId);
+  
   if (senderType === "visitor") {
     broadcastToAdmin(conv.site_api_key, { type: "new_message", data: newMsg });
     broadcastToVisitor(conversationId, { type: "new_message", data: newMsg });
@@ -113,8 +155,9 @@ app.post("/api/chat/send", (req, res) => {
 app.get("/api/admin/conversations", (req, res) => {
   const apiKey = req.query.api_key;
   const convs = db.prepare(`
-    SELECT c.id, c.visitor_id, c.created_at,
-    (SELECT message FROM messages WHERE conversation_id = c.id ORDER BY id DESC LIMIT 1) as last_message
+    SELECT c.id, c.visitor_id, c.visitor_name, c.created_at,
+    (SELECT message FROM messages WHERE conversation_id = c.id ORDER BY id DESC LIMIT 1) as last_message,
+    (SELECT attachment_url FROM messages WHERE conversation_id = c.id ORDER BY id DESC LIMIT 1) as last_attachment
     FROM conversations c WHERE c.site_api_key = ? ORDER BY c.created_at DESC
   `).all(apiKey);
   res.json(convs);
