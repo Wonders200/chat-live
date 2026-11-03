@@ -109,6 +109,12 @@ app.get("/api/sse/admin", (req, res) => {
   });
 });
 
+app.get("/api/chat/history/:convId", (req, res) => {
+  const { convId } = req.params;
+  const messages = db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC").all(convId);
+  res.json({ messages });
+});
+
 app.post("/api/chat/init", (req, res) => {
   const { apiKey, visitorId, visitorName } = req.body;
   const site = db.prepare("SELECT * FROM sites WHERE api_key = ?").get(apiKey);
